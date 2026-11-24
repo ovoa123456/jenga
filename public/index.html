@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>우리 사이 젠가 - 온라인</title>
+<script src="/socket.io/socket.io.js"></script>
+<style>
+:root{--bg:#f7f2ec;--ink:#302a27;--accent:#d47c69;--panel:#fffaf5}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Noto Sans KR",sans-serif}
+header{padding:20px 18px 10px;text-align:center}h1{font-size:25px;margin:0 0 5px}header p{margin:0;color:#766b63;font-size:13px}
+main{max-width:1000px;margin:auto;padding:10px 14px 28px;display:grid;grid-template-columns:minmax(0,1.5fr) minmax(260px,.8fr);gap:14px}
+.panel{background:var(--panel);border:1px solid #eadfd5;border-radius:18px;padding:14px;box-shadow:0 5px 18px #6c4b3210}
+#view{height:480px;width:100%;display:block;border-radius:13px;background:linear-gradient(#e8edf0,#f5e9dd);touch-action:none}
+.controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+button,select{border:1px solid #e2d1c5;border-radius:12px;background:white;color:var(--ink);padding:10px 13px;font:inherit}
+button.primary{background:var(--accent);border-color:var(--accent);color:white;font-weight:700}
+button:disabled{opacity:.45}
+.small{font-size:12px;color:#82766e;line-height:1.55;margin:9px 2px 0}
+.side{display:flex;flex-direction:column;gap:12px}
+h2{font-size:16px;margin:0 0 10px}
+.status{font-size:13px;color:#766b63;margin-bottom:8px}
+.question{font-size:18px;line-height:1.55;min-height:112px;display:flex;align-items:center;justify-content:center;text-align:center;padding:14px;background:#f8eee8;border-radius:14px}
+.pill{display:inline-block;border-radius:30px;background:#f1e2da;padding:4px 9px;font-size:11px;color:#885747;margin-bottom:8px}
+label{font-size:12px;color:#766b63;display:block;margin:8px 0 5px}
+select{width:100%}
+#log{font-size:12px;line-height:1.7;color:#756a63;max-height:130px;overflow:auto}
+@media(max-width:720px){main{grid-template-columns:1fr}#view{height:390px}.side{display:grid;grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><h1>우리 사이 젠가</h1><p>방을 만들고 초대 링크를 공유해서 둘이 함께 플레이해 봐.</p></header>
+<section id="lobby" style="max-width:720px;margin:8px auto 14px;padding:14px;background:#fffaf5;border:1px solid #eadfd5;border-radius:16px">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <button class="primary" id="createRoom">방 만들기</button>
+    <input id="roomCode" placeholder="방 코드 입력" maxlength="6" style="width:135px;padding:10px;border:1px solid #e2d1c5;border-radius:12px;font:inherit;text-transform:uppercase">
+    <button id="joinRoom">방 입장</button>
+    <button id="copyInvite" disabled>초대 링크 복사</button>
+  </div>
+  <p id="roomStatus" style="font-size:13px;color:#766b63;margin:10px 0 0">먼저 방을 만들거나 친구에게 받은 코드를 입력해.</p>
+</section>
+<main>
+<section class="panel">
+<canvas id="view"></canvas>
+<div class="controls">
+<button class="primary" id="reset">새 게임</button>
+<button id="next">질문 뽑기</button>
+<button id="undo">마지막 동작 되돌리기</button>
+</div>
+<p class="small">블록을 마우스나 손가락으로 눌러 옆으로 드래그해서 뽑아 봐. 블록이 실제 물리엔진으로 움직여. 탑이 무너지면 게임 종료!</p>
+</section>
+<aside class="side">
+<section class="panel">
+<h2>이번 질문</h2><div class="status" id="turn">1번 플레이어 차례</div>
+<div class="pill" id="category">연애 질문</div>
+<div class="question" id="question">블록을 뽑으면 질문이 나와!</div>
+<div class="controls"><button class="primary" id="answered">답변 완료 · 차례 넘기기</button></div>
+</section>
+<section class="panel">
+<h2>질문 설정</h2>
+<label for="mode">질문 카테고리</label>
+<select id="mode"><option value="all">전체 섞기</option><option value="warm">설레는 연애</option><option value="daily">일상과 취향</option><option value="memory">우리의 추억</option><option value="deep">진지한 대화</option><option value="spicy">조금 과감하게</option></select>
+<p class="small">질문 뽑기를 누르면 블록을 뽑지 않고 질문만 미리 볼 수도 있어.</p>
+</section>
+<section class="panel"><h2>게임 기록</h2><div id="log">게임을 시작해 봐!</div></section>
+</aside>
+</main>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import * as CANNON from 'https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js';
+const socket = io();
+let roomId = null, myPlayer = null, applyingRemote = false, syncTimer = null;
+const roomStatus = document.querySelector('#roomStatus');
+function setRoomStatus(s){ roomStatus.textContent=s; }
+function enterRoom(code){
+  socket.emit('join-room', {roomId:code}, result=>{
+    if(!result.ok){setRoomStatus(result.error);return;}
+    roomId=result.roomId; myPlayer=result.player;
+    document.querySelector('#roomCode').value=roomId;
+    document.querySelector('#copyInvite').disabled=false;
+    setRoomStatus(`방 ${roomId} 접속 완료 · ${result.count}/2명 접속 중`);
+    if(result.state && result.state.transforms) applyTransforms(result.state.transforms);
+    document.querySelector('#turn').textContent = `${result.state?.turn || 1}번 플레이어 차례`;
+  });
+}
+document.querySelector('#createRoom').onclick=()=>socket.emit('create-room', result=>{
+  if(!result.ok){setRoomStatus(result.error);return;}
+  enterRoom(result.roomId);
+});
+document.querySelector('#joinRoom').onclick=()=>enterRoom(document.querySelector('#roomCode').value.trim().toUpperCase());
+document.querySelector('#copyInvite').onclick=async()=>{
+  const link=`${location.origin}/?room=${roomId}`;
+  try{await navigator.clipboard.writeText(link);setRoomStatus('초대 링크를 복사했어! 상대에게 보내 줘.');}
+  catch{setRoomStatus(`초대 링크: ${link}`);}
+};
+const params=new URLSearchParams(location.search);
+if(params.get('room')){document.querySelector('#roomCode').value=params.get('room').toUpperCase();setTimeout(()=>enterRoom(params.get('room').toUpperCase()),250);}
+socket.on('room-count', data=>{if(data.roomId===roomId)setRoomStatus(`방 ${roomId} · ${data.count}/2명 접속 중`);});
+socket.on('game-state', data=>{if(data.roomId!==roomId||!data.transforms)return;applyTransforms(data.transforms);});
+socket.on('question-sync', data=>{if(data.roomId!==roomId)return;document.querySelector('#category').textContent=data.category;document.querySelector('#question').textContent=data.question;document.querySelector('#turn').textContent=`${data.turn}번 플레이어 차례`;});
+socket.on('turn-sync', data=>{if(data.roomId===roomId){turn=data.turn;document.querySelector('#turn').textContent=`${turn}번 플레이어 차례`;}});
+function applyTransforms(transforms){
+  applyingRemote=true;
+  for(const t of transforms){const b=blocks[t.index];if(!b)continue;b.body.position.set(t.p[0],t.p[1],t.p[2]);b.body.quaternion.set(t.q[0],t.q[1],t.q[2],t.q[3]);b.body.velocity.set(0,0,0);b.body.angularVelocity.set(0,0,0);b.body.wakeUp();}
+  applyingRemote=false;
+}
+function publishState(){
+ if(!roomId||applyingRemote)return;
+ const transforms=blocks.map(b=>({index:b.index,p:[b.body.position.x,b.body.position.y,b.body.position.z],q:[b.body.quaternion.x,b.body.quaternion.y,b.body.quaternion.z,b.body.quaternion.w]}));
+ socket.emit('game-state',{roomId,transforms});
+}
+const canvas=document.querySelector('#view');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.shadowMap.enabled=true;
+const scene=new THREE.Scene();scene.background=new THREE.Color(0xe8edf0);
+const camera=new THREE.PerspectiveCamera(38,1,.1,100);camera.position.set(8,8,11);camera.lookAt(0,3.3,0);
+scene.add(new THREE.HemisphereLight(0xffffff,0x9b8170,2));
+const sun=new THREE.DirectionalLight(0xffffff,2.2);sun.position.set(5,10,6);sun.castShadow=true;scene.add(sun);
+const floor=new THREE.Mesh(new THREE.PlaneGeometry(30,30),new THREE.MeshStandardMaterial({color:0xf4e8dc,roughness:.9}));floor.rotation.x=-Math.PI/2;floor.position.y=-.16;floor.receiveShadow=true;scene.add(floor);
+const world=new CANNON.World({gravity:new CANNON.Vec3(0,-9.82,0)});world.broadphase=new CANNON.SAPBroadphase(world);world.allowSleep=true;
+world.defaultContactMaterial.friction=.65;world.defaultContactMaterial.restitution=.03;
+const ground=new CANNON.Body({mass:0,shape:new CANNON.Plane(),material:new CANNON.Material()});ground.quaternion.setFromEuler(-Math.PI/2,0,0);world.addBody(ground);
+const wood=new THREE.MeshStandardMaterial({color:0xc9915c,roughness:.72});
+const edge=new THREE.MeshStandardMaterial({color:0xb77c49,roughness:.8});
+let blocks=[],turn=1,moves=0,selected=null,dragStart=null,history=[];
+const raycaster=new THREE.Raycaster(),pointer=new THREE.Vector2(),plane=new THREE.Plane(new THREE.Vector3(0,1,0),0);
+function resize(){const r=canvas.getBoundingClientRect();renderer.setSize(r.width,r.height,false);camera.aspect=r.width/r.height;camera.updateProjectionMatrix()}new ResizeObserver(resize).observe(canvas);resize();
+function addBlock(x,y,z,rot,index){const mesh=new THREE.Mesh(new THREE.BoxGeometry(1.5,.48,.48),wood);mesh.castShadow=true;mesh.receiveShadow=true;mesh.position.set(x,y,z);mesh.rotation.y=rot;scene.add(mesh);
+const shape=new CANNON.Box(new CANNON.Vec3(.75,.24,.24));const body=new CANNON.Body({mass:1,shape,position:new CANNON.Vec3(x,y,z),material:new CANNON.Material(),linearDamping:.12,angularDamping:.2});body.quaternion.setFromEuler(0,rot,0);body.sleepSpeedLimit=.12;world.addBody(body);blocks.push({mesh,body,index,removed:false});}
+function build(){for(const b of blocks){scene.remove(b.mesh);world.removeBody(b.body)}blocks=[];for(let l=0;l<16;l++){const y=.24+l*.49;const rot=l%2?Math.PI/2:0;for(let i=0;i<3;i++){let x,z;if(rot===0){x=(i-1)*.5;z=0}else{x=0;z=(i-1)*.5}addBlock(x,y,z,rot,l*3+i)}}moves=0;turn=1;selected=null;document.querySelector('#turn').textContent='1번 플레이어 차례';document.querySelector('#question').textContent='블록을 뽑으면 질문이 나와!';document.querySelector('#log').textContent='새 게임 시작!';}
+const qs={
+warm:['처음 나를 좋아한다고 느낀 순간은 언제야?','내가 해준 말 중 오래 기억에 남는 말은?','우리 둘만 아는 귀여운 습관이 있어?','요즘 나에게 가장 설레는 순간은?','내 어떤 표정이나 행동을 제일 좋아해?','우리의 다음 데이트에서 꼭 하고 싶은 건?'],
+daily:['하루를 통째로 같이 보낸다면 뭐 하고 싶어?','요즘 가장 자주 생각나는 음식은?','서로 바꿔 살아본다면 가장 먼저 해보고 싶은 일은?','나와 취향이 가장 잘 맞는 부분은?','돈 걱정 없이 하루를 보낸다면 어디 갈래?'],
+memory:['우리 첫 만남에서 기억나는 디테일은?','함께한 날 중 다시 돌아가고 싶은 하루는?','나와 함께해서 처음 해본 일이 있어?','둘이 가장 많이 웃었던 순간은?','우리 사진 중 가장 좋아하는 사진은?'],
+deep:['연애하면서 꼭 지키고 싶은 원칙은?','힘들 때 내가 어떻게 해주면 가장 도움이 돼?','사랑받는다고 느끼는 순간은 언제야?','서로 더 잘 이해하기 위해 바라는 점은?','앞으로 함께 이루고 싶은 작은 목표는?'],
+spicy:['내가 가장 매력적으로 보이는 순간은?','우리 사이에서 가장 아찔했던 순간은?','나에게 먼저 해보고 싶었지만 망설인 스킨십은?','둘만 있을 때 듣고 싶은 말은?','내가 해주면 좋겠는 애정 표현은?']
+};
+function drawQuestion(){const mode=document.querySelector('#mode').value;const keys=mode==='all'?Object.keys(qs):[mode];const key=keys[Math.floor(Math.random()*keys.length)];const q=qs[key][Math.floor(Math.random()*qs[key].length)];document.querySelector('#category').textContent={warm:'설레는 연애',daily:'일상과 취향',memory:'우리의 추억',deep:'진지한 대화',spicy:'조금 과감하게'}[key];document.querySelector('#question').textContent=q;document.querySelector('#log').textContent=`${moves+1}번째 블록 · ${turn}번 플레이어: ${q} `+document.querySelector('#log').textContent;
+if(roomId)socket.emit('question-sync',{roomId,question:q,category:document.querySelector('#category').textContent,turn});
+return q;}
+function setPointer(e){const r=canvas.getBoundingClientRect();pointer.x=(e.clientX-r.left)/r.width*2-1;pointer.y=-(e.clientY-r.top)/r.height*2+1;raycaster.setFromCamera(pointer,camera)}
+canvas.addEventListener('pointerdown',e=>{setPointer(e);const hits=raycaster.intersectObjects(blocks.filter(b=>!b.removed).map(b=>b.mesh));if(!hits.length)return;const b=blocks.find(x=>x.mesh===hits[0].object);if(!b)return;selected=b;dragStart={x:b.body.position.x,y:b.body.position.y,z:b.body.position.z};history.push({b,pos:dragStart,quat:b.body.quaternion.clone()});b.body.wakeUp();canvas.setPointerCapture(e.pointerId)});
+canvas.addEventListener('pointermove',e=>{if(!selected)return;setPointer(e);const p=new THREE.Vector3();raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0,1,0),-selected.body.position.y),p);if(Number.isFinite(p.x)){selected.body.position.x=p.x;selected.body.position.z=p.z;selected.body.velocity.set(0,0,0);selected.body.angularVelocity.set(0,0,0);publishState()}});
+canvas.addEventListener('pointerup',()=>{if(selected){moves++;drawQuestion();selected.body.wakeUp();publishState();document.querySelector('#turn').textContent=`${turn}번 플레이어 차례 · ${moves}번째 블록`;selected=null;dragStart=null}});
+document.querySelector('#reset').onclick=()=>{build();if(roomId)publishState();};
+document.querySelector('#next').onclick=drawQuestion;
+document.querySelector('#answered').onclick=()=>{turn=turn===1?2:1;document.querySelector('#turn').textContent=`${turn}번 플레이어 차례`;if(roomId)socket.emit('turn-sync',{roomId,turn});};
+document.querySelector('#undo').onclick=()=>{const h=history.pop();if(!h)return;h.b.body.position.set(h.pos.x,h.pos.y,h.pos.z);h.b.body.quaternion.copy(h.quat);h.b.body.velocity.set(0,0,0);h.b.body.angularVelocity.set(0,0,0);h.b.body.wakeUp();moves=Math.max(0,moves-1)};
+build();
+let last=performance.now();function animate(t){requestAnimationFrame(animate);const dt=Math.min((t-last)/1000,.033);last=t;world.step(1/60,dt,3);for(const b of blocks){b.mesh.position.copy(b.body.position);b.mesh.quaternion.copy(b.body.quaternion)}renderer.render(scene,camera)}requestAnimationFrame(animate);
+</script>
+</body></html>
